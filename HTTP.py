@@ -1,10 +1,10 @@
 import socket
 import logging
 import multiprocessing
-import select
 import os
 from datetime import datetime
 import urllib.parse
+import mimetypes
 
 
 HTTP_VERSION = "HTTP/1.1"
@@ -197,53 +197,72 @@ class HTTP_Server:
 
         A HEAD request is the same as a GET request except it will not include any HTTP message body.
         """
-        return self.http_method_get(req, False)
+        return self.http_method_get(req, True)
 
-    def serve_error(self, type, send_body=True):
+    def serve_error(self, type, method_head):
         """
-        Returns a response of an HTTP error of the given type (e.g. "Not Found")
+        Returns an HTTP_Message response of an HTTP error of the given type (e.g. "Not Found")
         """
         #logging.warning("Serving error " + STATUS_CODES[type])
 
         ret = HTTP_Message()
-        body = "<html><body><h1>{}</h1></body></html>".format(STATUS_CODES[type])
 
-        if send_body:
-            return ret.create_response(type, body)
-        else:
-            return ret.create_response(type, None)
+        if not method_head:
+            ret.body = bytes("<html><body><h1>{}</h1></body></html>".format(STATUS_CODES[type]), "utf-8")
+            ret.headers["Content-Type"] = 'text/html'
 
-    def get_file(self, file_path):
+        ret.create_response(type)
+        return ret
+
+    def serve_file(self, file_path, method_head=False):
         """
-        Returns the contents of the given file as a string
+        Returns a 200 OK HTTP_Message with the contents of the given file in the message body
         """
         #logging.info("Retrieving file " + file_path)
 
-        ret = ""
-        with open(file_path, 'r') as file:
-            ret += file.read()
+        ret = HTTP_Message()
+
+        if not method_head:
+            with open(file_path, 'rb') as file:
+                ret.body += file.read()
+
+        ret.create_response("OK")
+
+        type, encoding = mimetypes.guess_type(file_path)
+        ret.headers["Content-Type"] = type
+        if encoding is not None:
+            ret.headers["Content-Encoding"] = encoding
 
         return ret
 
-    def get_directory_listing(self, path, uri):
+    def serve_directory_listing(self, path, uri, method_head=False):
         """
-        Returns an HTML message string of the files in the current directory to be used in an HTTP response
+        Returns an HTML Message response of a directory listing of the files in the current directory
         """
         #logging.debug("Generating directory listing for {} ({})".format(uri, path))
 
-        files = [i for i in os.listdir(path) if os.path.isfile(os.path.join(path, i))]
-        dirs = [i for i in os.listdir(path) if os.path.isdir(os.path.join(path, i))]
+        response = HTTP_Message()
 
-        listing = ""
+        if not method_head:
+            files = [i for i in os.listdir(path) if os.path.isfile(os.path.join(path, i))]
+            dirs = [i for i in os.listdir(path) if os.path.isdir(os.path.join(path, i))]
 
-        for dir in dirs:
-            listing += "<p><a href='{}'>{}</a></p>".format(uri + "/" + dir, dir + "/")
+            if len(files) == 0 and len(dirs) == 0:
+                listing = "<p>This directory is empty.</p>"
+            else:
+                listing = ""
 
-        for file in files:
-            listing += "<p><a href='{}'>{}</a></p>".format(uri + "/" + file, file)
+                for dir in dirs:
+                    listing += "<p><a href='{}'>{}</a></p>".format(uri + "/" + dir, dir + "/")
 
-        body = "<html><body><h1>Index of: {}</h1>{}</body></html>".format(uri, listing)
-        return body
+                for file in files:
+                    listing += "<p><a href='{}'>{}</a></p>".format(uri + "/" + file, file)
+
+            response.body = bytes("<html><body><h1>Index of: {}</h1>{}</body></html>".format(uri, listing), "utf-8")
+            response.headers["Content-Type"] = 'text/html'
+
+        response.create_response("OK")
+        return response
 
     def _get_requests(self, queue):
         while True:
