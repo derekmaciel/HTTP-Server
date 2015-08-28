@@ -199,7 +199,7 @@ class HTTP_Server:
         """
         return self.http_method_get(req, True)
 
-    def serve_error(self, type, method_head):
+    def serve_error(self, type, method_head=False):
         """
         Returns an HTTP_Message response of an HTTP error of the given type (e.g. "Not Found")
         """
