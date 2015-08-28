@@ -41,9 +41,9 @@ class HTTP_Message:
     def __init__(self, data=None):
         self.type = None  # Request or Response
         self.request_line = {}
-        self.status_line = {}
+        self.status_line = None
         self.headers = {}
-        self.body = ""
+        self.body = b""
 
         if data is not None:
             self.parse_request(data)
@@ -52,8 +52,6 @@ class HTTP_Message:
         """
         Parses the given request bytestring
         """
-        self.type = "Request"
-
         # Many times a request will be 0 bytes. The smallest request would be "GET / HTTP/x.x/r/n" which is 16 bytes
         if len(bytestring) < 16:
             raise HTTPBadRequest
@@ -79,44 +77,42 @@ class HTTP_Message:
         # Lastly, the HTTP message
         self.body = http_message_line  # Should be blank for requests
 
-    def create_response(self, status, message):
+    def create_response(self, status):
         """
-        Creates a response HTTP message given a status code name (e.g. "OK") and an HTTP message body
+        Creates a response HTTP message given a status code name (e.g. "OK")
         """
-        self.type = "Response"
         self.status_line = HTTP_VERSION + " " + STATUS_CODES[status]
 
         # Set optional headers
         self.headers["Connection"] = "close"
         self.headers["Server"] = "PythonServer/1.0 (Windows 10)"
         self.headers["Date"] = datetime.now().strftime("%a, %d %b %Y %H:%M:%S ") + "EST"  # TODO: get timezone from OS
+        self.headers["Content-Length"] = str(len(self.body))
 
-        if message is not None:
-            self.body = message
-
-        return self.get_bytestring()
-
-    def get_bytestring(self):
+    def to_bytestring(self):
         """
         Converts this HTTP message into a bytestring suitable to be sent over a socket
         """
-        newline = b"\r\n"
-        ret = b""
+        newline = "\r\n"
+        ret = ""
 
         # Status line
-        ret += bytes(self.status_line, "utf-8") + newline
+        ret += self.status_line + newline
 
         # Headers
         for field, value in self.headers.items():
-            ret += bytes(field, "utf-8") + b": " + bytes(value, "utf8") + newline
+            ret += field + ": " + value + newline
 
         # Empty line
         ret += newline
 
+        ret = bytes(ret, "utf-8")
+
         # message body
         if self.body:
-            ret += bytes(self.body, "utf8")
-        ret += newline
+            ret += self.body
+
+        ret += bytes(newline, "utf-8")
 
         return ret
 
@@ -161,9 +157,9 @@ class HTTP_Server:
             return self.http_method_get(req)
         elif method == "HEAD":
             #logging.debug("Client requested HEAD")
-            return self.http_method_head(req)
+            return self.http_method_head(req, True)
 
-    def http_method_get(self, req, send_body=True):
+    def http_method_get(self, req, method_head=False):
         """
         Returns an appropriate HTTP_Message given an HTTP_Message GET request.
 
@@ -172,34 +168,28 @@ class HTTP_Server:
         uri = urllib.parse.unquote(req.request_line["Request-URI"])  # parse %xx special url characters
         path = os.path.join(self.web_root, uri[1:])  # ignore first slash of uri
 
-        response = HTTP_Message()
-        message_body = None
-
         if os.path.isdir(path):
             #logging.debug("The request's URI is a directory. Attempting to find index file")
-            # if either index.html or index.htm exists:
-            for index_file in [os.path.join(path, "index.html"), os.path.join(path, "index.htm")]:
-                if os.path.isfile(index_file):
-                    message_body = self.get_file(index_file)
+            # get the name of the index file
+            index_file = None
+            for file in [os.path.join(path, "index.html"), os.path.join(path, "index.htm")]:
+                if os.path.isfile(file):
+                    index_file = file
                     break
-
+                    
             # If no index file then show directory listing of this directory
-            if message_body is None:
-                message_body = self.get_directory_listing(path, uri)
+            if index_file is None:
+                return self.serve_directory_listing(path, uri, method_head)
+            else:
+                return self.serve_file(index_file, method_head)
 
         # If path is not a directory, maybe it's a file
         elif os.path.isfile(path):
             #logging.debug("The request's URI is a file")
-            message_body = self.get_file(path)
+            return self.serve_file(path, method_head)
         else:
             #logging.warning("File not found " + uri)
-            return self.serve_error("Not Found", send_body)
-
-        # We have a message body, time to respond
-        if send_body:
-            return response.create_response("OK", message_body)
-        else:
-            return response.create_response("OK", None)
+            return self.serve_error("Not Found", method_head)
 
     def http_method_head(self, req):
         """
@@ -280,7 +270,7 @@ class HTTP_Server:
                 else:
                     response = self.parse_request(request)
                 finally:
-                    clientsocket.send(response)  # todo: socket.sendfile()
+                    clientsocket.send(response.to_bytestring())  # todo: socket.sendfile()
                     #logging.info("Closing connection with " + clientsocket.getsockname()[0])
                     clientsocket.close()
 
@@ -289,6 +279,10 @@ class HTTP_Server:
 
         listener = multiprocessing.Process(target=self._get_requests, args=(request_queue,))
         responder = multiprocessing.Process(target=self._process_requests, args=(request_queue,))
+
+        # TODO: Pool of workers to respond to messages. Spawn one new process for every request coming in so they can work in parallel
+
+        # TODO: Log to file, access.log and error.log
 
         listener.start()
         responder.start()
